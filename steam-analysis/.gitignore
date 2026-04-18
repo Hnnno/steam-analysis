@@ -1,0 +1,17 @@
+# Datos
+data/raw/
+data/clean/
+*.csv
+*.csv.gz
+*.db
+
+# Imágenes generadas
+img/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.env
+venv/
