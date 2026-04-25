@@ -15,16 +15,16 @@ Forma parte de un portafolio de Data Analyst. Cubre el pipeline completo: obtenc
 - [x] Dashboard básico funcional en Streamlit (`app.py`)
 
 ### v2 — Análisis más profundo
-- [ ] Análisis de tendencias por año de lanzamiento
-- [ ] Comparativa entre géneros: precio, playtime y reviews
-- [ ] Ranking de desarrolladoras por review score histórico
-- [ ] Métrica compuesta de "valor": combina precio, playtime y reviews
+- [x] Análisis de tendencias por año de lanzamiento
+- [x] Comparativa entre géneros: precio, playtime y reviews
+- [x] Ranking de desarrolladoras por review score histórico
+- [x] Métrica compuesta de "valor": combina precio, playtime y reviews
 
 ### v3 — Dashboard completo
-- [ ] Filtros por género, año y rango de precio
-- [ ] Vista de detalle por juego individual
-- [ ] Gráfico de evolución histórica de lanzamientos
-- [ ] Deploy en Streamlit Cloud con URL pública
+- [x] Filtros por género, año y rango de precio
+- [x] Vista de detalle por juego individual
+- [x] Gráfico de evolución histórica de lanzamientos
+- [x] Deploy en Streamlit Cloud con URL pública
 
 ### v4 — Extensiones futuras
 - [ ] Integrar datos en tiempo real desde la Steam API
@@ -87,6 +87,21 @@ streamlit run app.py
 - ¿Qué año tuvo los mejores lanzamientos?
 - ¿Los juegos gratuitos tienen peores reviews que los de pago?
 - ¿Qué desarrolladora tiene el mejor promedio histórico?
+
+---
+
+## Deploy en Streamlit Cloud
+
+1. Subí el repositorio a GitHub (sin `data/` — está en `.gitignore`)
+2. Entrá a [share.streamlit.io](https://share.streamlit.io) e iniciá sesión con GitHub
+3. **New app** → seleccioná el repo → `app.py` como archivo principal
+4. En **Advanced settings → Secrets**, agregá la ruta de la base de datos si es necesario
+5. Click en **Deploy** — en 2 minutos tenés la URL pública
+
+> **Nota:** Streamlit Cloud no puede generar `steam.db` en el servidor porque el dataset no está en el repo. Opciones:
+> - Subir `steam.db` a Google Drive y descargarlo al inicio del app con `gdown`
+> - Usar [Supabase](https://supabase.com) (PostgreSQL gratuito) como base de datos en la nube
+> - Subir el CSV a GitHub LFS y adaptar el notebook para correr en el servidor
 
 ---
 
