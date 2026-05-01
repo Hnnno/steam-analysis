@@ -27,9 +27,9 @@ Forma parte de un portafolio de Data Analyst. Cubre el pipeline completo: obtenc
 - [x] Deploy en Streamlit Cloud con URL pública
 
 ### v4 — Extensiones futuras
-- [ ] Integrar datos en tiempo real desde la Steam API
-- [ ] Modelo de recomendación simple basado en géneros y playtime
-- [ ] Comparar precios históricos usando SteamDB
+- [x] Integrar datos en tiempo real desde la Steam API (precio actual, imagen, descripción)
+- [x] Modelo de recomendación basado en géneros, playtime y review score (cosine similarity)
+- [x] Comparativa de precio del dataset vs precio actual en Steam
 
 ---
 

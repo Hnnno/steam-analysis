@@ -1,8 +1,12 @@
 import sqlite3
+import requests
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(
     page_title="Steam Value Analyzer",
@@ -11,7 +15,12 @@ st.set_page_config(
 )
 
 DB_PATH = "data/clean/steam.db"
+STEAM_API_URL = "https://store.steampowered.com/api/appdetails"
 
+
+# ================================================================
+# Helpers de base de datos
+# ================================================================
 
 def query(sql, params=None):
     with sqlite3.connect(DB_PATH) as conn:
@@ -36,12 +45,13 @@ def get_filter_options():
 
 
 @st.cache_data
-def load_main(generos_sel, anio_min, anio_max, precio_min, precio_max, score_min, min_ratings, solo_pago):
-    gen_filter = f"AND genres IN ({','.join(['?']*len(generos_sel))})" if generos_sel else ""
+def load_main(generos_sel, anio_min, anio_max, precio_min, precio_max,
+              score_min, min_ratings, solo_pago):
+    gen_filter  = f"AND genres IN ({','.join(['?']*len(generos_sel))})" if generos_sel else ""
     precio_pago = "AND price > 0" if solo_pago else ""
     params = [*generos_sel, anio_min, anio_max, precio_min, precio_max, score_min, min_ratings]
     return query(f"""
-        SELECT name, developer, genres, release_year,
+        SELECT appid, name, developer, genres, release_year,
                ROUND(price, 2) AS price,
                average_playtime,
                ROUND(review_score, 1) AS review_score,
@@ -58,6 +68,19 @@ def load_main(generos_sel, anio_min, anio_max, precio_min, precio_max, score_min
           {precio_pago}
         ORDER BY valor_score DESC
     """, params)
+
+
+@st.cache_data
+def load_all_for_recommender():
+    return query("""
+        SELECT appid, name, genres, price, average_playtime,
+               review_score, horas_por_dolar, valor_score, total_ratings
+        FROM games
+        WHERE review_score IS NOT NULL
+          AND price > 0
+          AND average_playtime > 0
+          AND total_ratings >= 20
+    """)
 
 
 @st.cache_data
@@ -116,7 +139,89 @@ def load_desarrolladoras():
 
 
 # ================================================================
-# Sidebar — filtros v3
+# Steam API
+# ================================================================
+
+@st.cache_data(ttl=3600)
+def fetch_steam_data(appid):
+    """Trae datos en tiempo real de un juego desde la Steam Store API."""
+    try:
+        resp = requests.get(
+            STEAM_API_URL,
+            params={"appids": appid, "cc": "us", "l": "en"},
+            timeout=8
+        )
+        data = resp.json().get(str(appid), {})
+        if not data.get("success"):
+            return None
+        d = data["data"]
+        price_raw = d.get("price_overview", {})
+        return {
+            "name":         d.get("name"),
+            "description":  d.get("short_description", ""),
+            "header_image": d.get("header_image", ""),
+            "genres":       ", ".join(g["description"] for g in d.get("genres", [])),
+            "developers":   ", ".join(d.get("developers", [])),
+            "price_actual": price_raw.get("final", 0) / 100 if price_raw else 0,
+            "price_fmt":    price_raw.get("final_formatted", "Gratuito"),
+            "is_free":      d.get("is_free", False),
+            "metacritic":   d.get("metacritic", {}).get("score"),
+            "website":      d.get("website", ""),
+            "steam_url":    f"https://store.steampowered.com/app/{appid}",
+        }
+    except Exception:
+        return None
+
+
+# ================================================================
+# Recomendador (cosine similarity)
+# ================================================================
+
+@st.cache_data
+def build_recommender_matrix():
+    df_r = load_all_for_recommender().copy()
+
+    # Encode géneros como dummies
+    genre_dummies = df_r["genres"].str.get_dummies(sep=";")
+
+    # Normalizar métricas numéricas
+    num_cols = ["price", "average_playtime", "review_score",
+                "horas_por_dolar", "valor_score", "total_ratings"]
+    scaler = MinMaxScaler()
+    num_scaled = pd.DataFrame(
+        scaler.fit_transform(df_r[num_cols].fillna(0)),
+        columns=num_cols,
+        index=df_r.index
+    )
+
+    # Pesos: géneros 40%, métricas 60%
+    feature_matrix = pd.concat([
+        genre_dummies * 0.4,
+        num_scaled * 0.6
+    ], axis=1)
+
+    similarity = cosine_similarity(feature_matrix)
+    return df_r.reset_index(drop=True), similarity
+
+
+def get_recommendations(nombre, n=10):
+    df_r, sim = build_recommender_matrix()
+    matches = df_r[df_r["name"] == nombre]
+    if matches.empty:
+        return pd.DataFrame()
+    idx = matches.index[0]
+    scores = list(enumerate(sim[idx]))
+    scores = sorted(scores, key=lambda x: x[1], reverse=True)[1:n+1]
+    indices = [i for i, _ in scores]
+    sim_scores = [round(s * 100, 1) for _, s in scores]
+    result = df_r.iloc[indices].copy()
+    result["similitud (%)"] = sim_scores
+    return result[["name", "genres", "price", "review_score",
+                   "horas_por_dolar", "valor_score", "similitud (%)"]].reset_index(drop=True)
+
+
+# ================================================================
+# Sidebar
 # ================================================================
 st.sidebar.title("🎮 Filtros")
 
@@ -144,21 +249,22 @@ df = load_main(generos_sel, anio_min, anio_max, precio_min, precio_max,
                score_min, min_ratings, solo_pago)
 
 # ================================================================
-# Navegación por tabs
+# Header y tabs
 # ================================================================
-st.title("Steam Value Analyzer 🎮")
-st.caption("¿Qué juegos realmente valen su precio? · fuente: Kaggle — Steam Store Games")
+st.title("Steam Value Analyzer")
+st.caption("¿Qué juegos realmente valen su precio? · fuente: Kaggle + Steam API")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Exploración",
-    "🔍 Detalle de juego",
-    "📈 Evolución histórica",
-    "🎭 Géneros",
-    "🏆 Desarrolladoras"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Exploración",
+    "Detalle de juego",
+    "Recomendador",
+    "Evolución histórica",
+    "Géneros",
+    "Desarrolladoras",
 ])
 
 # ================================================================
-# TAB 1 — Exploración principal
+# TAB 1 — Exploración
 # ================================================================
 with tab1:
     c1, c2, c3, c4 = st.columns(4)
@@ -169,7 +275,6 @@ with tab1:
               f"{df['valor_score'].mean():.1f}" if df['valor_score'].notna().any() else "—")
 
     st.divider()
-
     col_a, col_b = st.columns([3, 2])
 
     with col_a:
@@ -208,12 +313,11 @@ with tab1:
         df[["name", "genres", "price", "review_score", "average_playtime",
             "horas_por_dolar", "valor_score", "total_ratings", "developer",
             "release_year"]].reset_index(drop=True),
-        use_container_width=True,
-        height=320
+        use_container_width=True, height=320
     )
 
 # ================================================================
-# TAB 2 — Detalle de juego individual
+# TAB 2 — Detalle de juego + Steam API + comparativa de precio
 # ================================================================
 with tab2:
     st.subheader("Vista de detalle por juego")
@@ -221,16 +325,12 @@ with tab2:
     if len(df) == 0:
         st.warning("No hay juegos con los filtros actuales.")
     else:
-        juego_sel = st.selectbox(
-            "Seleccioná un juego",
-            df["name"].tolist(),
-            index=0
-        )
-
+        juego_sel = st.selectbox("Seleccioná un juego", df["name"].tolist(), index=0)
         row = df[df["name"] == juego_sel].iloc[0]
 
+        # --- Métricas del dataset ---
         col1, col2, col3 = st.columns(3)
-        col1.metric("Precio", f"${row['price']:.2f}")
+        col1.metric("Precio (dataset)", f"${row['price']:.2f}")
         col2.metric("Review score", f"{row['review_score']:.1f}%" if pd.notna(row['review_score']) else "—")
         col3.metric("Valor score", f"{row['valor_score']:.1f}" if pd.notna(row['valor_score']) else "—")
 
@@ -239,26 +339,85 @@ with tab2:
         col5.metric("Horas por dólar", f"{row['horas_por_dolar']}" if pd.notna(row['horas_por_dolar']) else "—")
         col6.metric("Total reviews", f"{int(row['total_ratings']):,}" if pd.notna(row['total_ratings']) else "—")
 
-        st.markdown(f"""
-        | Campo | Valor |
-        |---|---|
-        | Desarrolladora | {row['developer']} |
-        | Género | {row['genres']} |
-        | Año de lanzamiento | {int(row['release_year']) if pd.notna(row['release_year']) else '—'} |
-        | Categoría de precio | {row['categoria_precio']} |
-        """)
+        st.divider()
+
+        # --- Steam API: datos en tiempo real ---
+        col_info, col_api = st.columns([1, 1])
+
+        with col_info:
+            st.markdown(f"""
+            | Campo | Valor |
+            |---|---|
+            | Desarrolladora | {row['developer']} |
+            | Género | {row['genres']} |
+            | Año de lanzamiento | {int(row['release_year']) if pd.notna(row['release_year']) else '—'} |
+            | Categoría de precio | {row['categoria_precio']} |
+            | AppID | {int(row['appid']) if pd.notna(row['appid']) else '—'} |
+            """)
+
+        with col_api:
+            st.subheader("Datos en tiempo real (Steam API)")
+            appid = row.get("appid")
+
+            if appid and not pd.isna(appid):
+                with st.spinner("Consultando Steam API..."):
+                    steam = fetch_steam_data(int(appid))
+
+                if steam:
+                    if steam["header_image"]:
+                        st.image(steam["header_image"], use_container_width=True)
+
+                    st.markdown(f"**{steam['name']}**")
+                    if steam["description"]:
+                        st.caption(steam["description"][:300] + "...")
+
+                    m1, m2 = st.columns(2)
+                    m1.metric("Precio actual (Steam)", steam["price_fmt"])
+                    if steam["metacritic"]:
+                        m2.metric("Metacritic", f"{steam['metacritic']}/100")
+
+                    # Comparativa: precio dataset vs precio actual
+                    precio_dataset = row["price"]
+                    precio_actual  = steam["price_actual"]
+
+                    if precio_dataset > 0 and precio_actual > 0:
+                        diff     = precio_actual - precio_dataset
+                        diff_pct = (diff / precio_dataset) * 100
+                        st.divider()
+                        st.subheader("Comparativa de precio")
+                        fig_precio = go.Figure(go.Bar(
+                            x=["Precio en dataset\n(Kaggle ~2019)", "Precio actual\n(Steam hoy)"],
+                            y=[precio_dataset, precio_actual],
+                            marker_color=["#5b8db8", "#e07b39"],
+                            text=[f"${precio_dataset:.2f}", f"${precio_actual:.2f}"],
+                            textposition="outside"
+                        ))
+                        fig_precio.update_layout(
+                            height=300,
+                            margin=dict(l=0, r=0, t=10, b=0),
+                            yaxis_title="Precio (USD)",
+                            showlegend=False
+                        )
+                        st.plotly_chart(fig_precio, use_container_width=True)
+                        delta_str = f"+${diff:.2f} (+{diff_pct:.1f}%)" if diff >= 0 else f"-${abs(diff):.2f} ({diff_pct:.1f}%)"
+                        st.caption(f"Variación de precio: {delta_str} desde el dataset")
+
+                    st.link_button("Ver en Steam →", steam["steam_url"])
+                else:
+                    st.info("No se pudo obtener datos de Steam API para este juego.")
+            else:
+                st.info("Este juego no tiene AppID disponible.")
 
         st.divider()
-        st.subheader("¿Cómo se compara con el resto?")
 
-        # Radar chart: posición relativa del juego en 4 métricas
+        # --- Radar chart ---
+        st.subheader("¿Cómo se compara con el resto?")
         df_norm = df[["review_score", "horas_por_dolar", "valor_score", "total_ratings"]].copy()
         df_norm = df_norm.apply(lambda x: (x - x.min()) / (x.max() - x.min()) * 100)
 
-        idx = df[df["name"] == juego_sel].index[0]
+        idx        = df[df["name"] == juego_sel].index[0]
         vals_juego = df_norm.loc[idx]
         vals_prom  = df_norm.mean()
-
         categorias = ["Review score", "Horas/$", "Valor score", "Popularidad"]
 
         fig_radar = go.Figure()
@@ -276,35 +435,96 @@ with tab2:
         ))
         fig_radar.update_layout(
             polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-            height=420, margin=dict(l=40, r=40, t=40, b=40)
+            height=400, margin=dict(l=40, r=40, t=40, b=40)
         )
         st.plotly_chart(fig_radar, use_container_width=True)
 
-        # Juegos similares por género y rango de precio
-        st.subheader("Juegos similares")
-        similares = df[
-            (df["genres"] == row["genres"]) &
-            (df["name"] != juego_sel) &
-            (df["price"].between(row["price"] * 0.5, row["price"] * 1.5))
-        ].sort_values("valor_score", ascending=False).head(8)
-
-        if len(similares):
-            st.dataframe(
-                similares[["name", "price", "review_score", "horas_por_dolar", "valor_score"]].reset_index(drop=True),
-                use_container_width=True
-            )
-        else:
-            st.info("No hay juegos similares con los filtros actuales.")
-
 # ================================================================
-# TAB 3 — Evolución histórica
+# TAB 3 — Recomendador
 # ================================================================
 with tab3:
+    st.subheader("Recomendador de juegos")
+    st.caption("Basado en similitud de género, precio, playtime y review score (cosine similarity)")
+
+    df_all = load_all_for_recommender()
+
+    juego_base = st.selectbox(
+        "Seleccioná un juego como base",
+        sorted(df_all["name"].tolist()),
+        key="rec_select"
+    )
+
+    n_recs = st.slider("Cantidad de recomendaciones", 5, 20, 10)
+
+    if st.button("Buscar juegos similares"):
+        with st.spinner("Calculando similitudes..."):
+            recs = get_recommendations(juego_base, n=n_recs)
+
+        if recs.empty:
+            st.warning("No se encontraron recomendaciones.")
+        else:
+            # Mostrar el juego base
+            base_row = df_all[df_all["name"] == juego_base].iloc[0]
+            st.markdown(f"**Juego base:** {juego_base} · Género: `{base_row['genres']}` · "
+                        f"Precio: ${base_row['price']:.2f} · "
+                        f"Review: {base_row['review_score']:.1f}%")
+            st.divider()
+
+            # Gráfico de similitud
+            fig_rec = px.bar(
+                recs.sort_values("similitud (%)"),
+                x="similitud (%)", y="name", orientation="h",
+                color="valor_score", color_continuous_scale="Greens",
+                labels={"name": "", "similitud (%)": "Similitud (%)"},
+                hover_data={"price": True, "review_score": True, "genres": True}
+            )
+            fig_rec.update_layout(height=400, margin=dict(l=0, r=0, t=0, b=0),
+                                  coloraxis_showscale=True)
+            st.plotly_chart(fig_rec, use_container_width=True)
+
+            st.dataframe(recs, use_container_width=True)
+
+    # Sección: recomendaciones por preferencias del usuario
+    st.divider()
+    st.subheader("Recomendaciones por preferencias")
+    st.caption("No tenés un juego en mente — describí lo que buscás")
+
+    p1, p2, p3 = st.columns(3)
+    pref_genero  = p1.selectbox("Género preferido", ["Cualquiera"] + generos_opts)
+    pref_precio  = p2.slider("Precio máximo (USD)", 0, 60, 20)
+    pref_playtime = p3.slider("Mínimo de horas promedio", 0, 500, 50)
+
+    if st.button("Buscar por preferencias"):
+        gen_f = f"AND genres = '{pref_genero}'" if pref_genero != "Cualquiera" else ""
+        df_pref = query(f"""
+            SELECT name, genres, ROUND(price, 2) AS price,
+                   ROUND(review_score, 1) AS review_score,
+                   average_playtime,
+                   ROUND(horas_por_dolar, 1) AS horas_por_dolar,
+                   ROUND(valor_score, 1) AS valor_score
+            FROM games
+            WHERE price <= {pref_precio}
+              AND average_playtime >= {pref_playtime}
+              AND review_score IS NOT NULL
+              AND valor_score IS NOT NULL
+              {gen_f}
+            ORDER BY valor_score DESC
+            LIMIT 15
+        """)
+
+        if df_pref.empty:
+            st.info("No hay juegos con esas preferencias. Probá relajar los filtros.")
+        else:
+            st.dataframe(df_pref, use_container_width=True)
+
+# ================================================================
+# TAB 4 — Evolución histórica
+# ================================================================
+with tab4:
     st.subheader("Evolución histórica del catálogo de Steam")
 
     df_evol = load_evolucion()
 
-    # Lanzamientos por año
     fig_evol1 = px.area(
         df_evol, x="release_year", y="lanzamientos",
         labels={"release_year": "Año", "lanzamientos": "Juegos lanzados"},
@@ -326,8 +546,7 @@ with tab3:
         )
         fig_evol2.add_hline(
             y=df_evol["review_promedio"].mean(),
-            line_dash="dash", line_color="gray",
-            annotation_text="Promedio"
+            line_dash="dash", line_color="gray", annotation_text="Promedio"
         )
         fig_evol2.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig_evol2, use_container_width=True)
@@ -342,20 +561,18 @@ with tab3:
         fig_evol3.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig_evol3, use_container_width=True)
 
-    # Tabla resumen
     st.subheader("Tabla de evolución")
     st.dataframe(df_evol.rename(columns={
-        "release_year": "Año",
-        "lanzamientos": "Lanzamientos",
+        "release_year": "Año", "lanzamientos": "Lanzamientos",
         "review_promedio": "Review promedio (%)",
         "precio_promedio": "Precio promedio (USD)",
         "ratings_totales": "Reviews totales"
     }), use_container_width=True, height=300)
 
 # ================================================================
-# TAB 4 — Géneros
+# TAB 5 — Géneros
 # ================================================================
-with tab4:
+with tab5:
     st.subheader("Comparativa entre géneros")
 
     df_gen = load_generos_overview()
@@ -390,9 +607,9 @@ with tab4:
     }), use_container_width=True)
 
 # ================================================================
-# TAB 5 — Desarrolladoras
+# TAB 6 — Desarrolladoras
 # ================================================================
-with tab5:
+with tab6:
     st.subheader("Ranking de desarrolladoras")
     st.caption("Mínimo 5 juegos publicados · al menos 50 reviews por juego")
 
